@@ -15,8 +15,8 @@
     "CROP",
     "AREA_PLANTED"
   ],
-  "sklearn_version": "1.8.0",
-  "training_date": "2026-04-28T22:45:24.500948",
+  "sklearn_version": "1.7.2",
+  "training_date": "2026-07-07T01:42:57.586470",
   "test_r2_score": 0.8144847943825801,
   "test_mae": 0.8638020080087608,
   "test_mape": 148.06161721070677,
@@ -96,7 +96,7 @@
   "area_context_performance": {
     "LARGE": {
       "count": 1471,
-      "mae": 1.0692917618332256,
+      "mae": 1.0692917618332258,
       "actual_mean": 13.230557443915705,
       "predicted_mean": 13.28345730139415
     },
@@ -110,7 +110,7 @@
       "count": 3637,
       "mae": 0.700547722485953,
       "actual_mean": 11.04354412977729,
-      "predicted_mean": 11.025941739648804
+      "predicted_mean": 11.025941739648806
     }
   },
   "evaluation_artifact": "model_artifacts/evaluation_report.json",
