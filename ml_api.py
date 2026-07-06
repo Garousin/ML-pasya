@@ -10,6 +10,7 @@ import joblib
 import json
 import os
 import shutil
+import time
 from datetime import datetime
 from urllib.request import Request, urlopen
 
@@ -69,22 +70,78 @@ def ensure_model_artifact(file_name):
     url = get_artifact_url(file_name)
     print(f"[INFO] {file_name}: {reason}, downloading from {url}")
 
-    try:
-        os.makedirs(MODEL_DIR, exist_ok=True)
-        request = Request(url, headers={'User-Agent': 'ml-pasya-api/1.0'})
-        with urlopen(request, timeout=180) as response, open(file_path, 'wb') as out_file:
-            shutil.copyfileobj(response, out_file)
+    os.makedirs(MODEL_DIR, exist_ok=True)
 
-        if is_git_lfs_pointer(file_path):
-            return (
-                f"{file_name} downloaded as Git LFS pointer. "
-                "Use media.githubusercontent.com URL or set BEST_MODEL_URL/BEST_RF_MODEL_URL."
-            )
+    # Configurable retry parameters via environment variables
+    retries = int(os.environ.get('MODEL_ARTIFACT_DOWNLOAD_RETRIES', '3'))
+    backoff_factor = float(os.environ.get('MODEL_ARTIFACT_DOWNLOAD_BACKOFF', '2.0'))
+    min_bytes = int(os.environ.get('MODEL_ARTIFACT_MIN_BYTES', '10240'))  # 10 KB fallback
 
-        print(f"[OK] Downloaded artifact: {file_name}")
-        return None
-    except Exception as e:
-        return f"{file_name} download failed: {e}"
+    last_exc = None
+    tmp_path = file_path + '.tmp'
+
+    for attempt in range(1, retries + 1):
+        try:
+            # Try HEAD to get expected content length when available
+            expected_len = None
+            try:
+                head_req = Request(url, headers={'User-Agent': 'ml-pasya-api/1.0'}, method='HEAD')
+                with urlopen(head_req, timeout=30) as head_resp:
+                    cl = head_resp.getheader('Content-Length') or head_resp.getheader('content-length')
+                    if cl:
+                        expected_len = int(cl)
+            except Exception:
+                expected_len = None
+
+            req = Request(url, headers={'User-Agent': 'ml-pasya-api/1.0'})
+            with urlopen(req, timeout=180) as response, open(tmp_path, 'wb') as out_file:
+                shutil.copyfileobj(response, out_file)
+
+            # Verify download size
+            actual_size = os.path.getsize(tmp_path)
+            if expected_len is not None and actual_size != expected_len:
+                raise IOError(f"downloaded size {actual_size} != expected {expected_len}")
+
+            if expected_len is None:
+                # If file looks like a Git LFS pointer, move it into place and return pointer message
+                if is_git_lfs_pointer(tmp_path):
+                    os.replace(tmp_path, file_path)
+                    return (
+                        f"{file_name} downloaded as Git LFS pointer. "
+                        "Use media.githubusercontent.com URL or set BEST_MODEL_URL/BEST_RF_MODEL_URL."
+                    )
+
+                if actual_size < min_bytes:
+                    raise IOError(f"downloaded size {actual_size} bytes is below minimum threshold {min_bytes} bytes")
+
+            # Move temp file to final path atomically
+            os.replace(tmp_path, file_path)
+
+            # Final pointer sanity check
+            if is_git_lfs_pointer(file_path):
+                return (
+                    f"{file_name} downloaded as Git LFS pointer. "
+                    "Use media.githubusercontent.com URL or set BEST_MODEL_URL/BEST_RF_MODEL_URL."
+                )
+
+            print(f"[OK] Downloaded artifact: {file_name}")
+            return None
+
+        except Exception as e:
+            last_exc = e
+            print(f"[WARN] {file_name} download attempt {attempt}/{retries} failed: {e}")
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+
+            if attempt < retries:
+                sleep_for = backoff_factor ** (attempt - 1)
+                print(f"[INFO] Retrying in {sleep_for:.1f}s...")
+                time.sleep(sleep_for)
+
+    return f"{file_name} download failed after {retries} attempts: {last_exc}"
 
 print("Loading ML API V2 (Productivity-First)...")
 
@@ -542,6 +599,9 @@ def calculate_features_legacy(input_df):
 
 def get_prediction_with_confidence(input_df, area):
     """Get prediction with confidence intervals using productivity-first approach"""
+    # If RF model isn't available (failed to load), return None so API still serves predictions
+    if rf_model is None:
+        return None
     try:
         # Get predictions from RF model trees
         preprocessor = rf_model.named_steps['preprocessor']
@@ -579,7 +639,10 @@ def get_prediction_with_confidence(input_df, area):
 
 
 def model_is_ready():
-    return model is not None and rf_model is not None and PRODUCTIVITY_FIRST
+    # Allow the service to be ready when the primary productivity model is loaded.
+    # RF model (used for heuristic confidence intervals) is optional; if it's missing
+    # predictions still work but confidence intervals will be omitted.
+    return model is not None and PRODUCTIVITY_FIRST
 
 
 @app.route('/')
